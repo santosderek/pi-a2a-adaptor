@@ -1362,6 +1362,60 @@ Examples:
   });
 
   /**
+   * managed_agents_a2a tool
+   */
+  pi.registerTool({
+    name: "managed_agents_a2a",
+    label: "Managed Agents A2A Call",
+    description: "Call a remote A2A agent to perform a task (auto-reuses conversation context)",
+    parameters: {
+      type: "object",
+      properties: {
+        agent_url: { type: "string", description: "URL or name of the A2A agent" },
+        message: { type: "string", description: "Task message to send" },
+        timeout: { type: "number", description: "Timeout in milliseconds", default: 60000 },
+      },
+      required: ["agent_url", "message"],
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!taskManager) {
+        return { content: [{ type: "text" as const, text: "A2A not initialized" }], isError: true };
+      }
+      try {
+        const agent = resolveAgent(params.agent_url as string);
+
+        // Check for pending async — block
+        const pending = getPendingAsync(agent.url);
+        if (pending) {
+          return { content: [{ type: "text" as const, text: `Agent 正在执行异步任务 (${pending.slice(0, 8)})，请稍后重试` }], isError: true };
+        }
+
+        const contextId = resolveConversationContext(agent.url);
+
+        const result = await taskManager.sendTask(agent, params.message as string, {
+          contextId,
+          timeout: (params.timeout as number) ?? 60000,
+          polling: { intervalMs: 2000, maxAttempts: 180, timeoutMs: 600000 },
+        });
+        const text = extractTextFromResult(result);
+        recordTask((result as any).id, agent, params.message as string);
+
+        // Update conversation entry
+        if (contextId) {
+          touchConversation(agent.url);
+        } else {
+          createConversationEntry(agent.url, result.contextId, params.message as string);
+        }
+
+        return { content: [{ type: "text" as const, text }] };
+      } catch (err: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+      }
+    },
+  });
+
+
+  /**
    * a2a_parallel tool
    */
   pi.registerTool({
