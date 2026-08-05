@@ -1,0 +1,19 @@
+pi-extension/index.ts
+  s_e47e01bc7b5b62::t_c745fc7191d8bb 1364-1417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "395d4a18f90918c8d1d7afd331f96507f796fa88",
+  "prompts": {},
+  "sessions": {
+    "s_e47e01bc7b5b62": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fcec1-0a43-78c7-8126-60a7de59f216",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Derek Santos <dersanto@cisco.com>"
+    }
+  }
+}
