@@ -17,14 +17,14 @@ export class TaskManager {
     if (onUpdate) {
       return this.client.sendStreamingMessage(
         agent,
-        { role: "user", parts: [{ kind: "text", text: message }], messageId: this.genId(), contextId: options?.contextId || undefined },
+        { role: "ROLE_USER", parts: [{ text: message }], messageId: this.genId() },
         onUpdate,
         options
       );
     }
     const result = await this.client.sendMessage(
       agent,
-      { role: "user", parts: [{ kind: "text", text: message }], messageId: this.genId(), contextId: options?.contextId || undefined },
+      { role: "ROLE_USER", parts: [{ text: message }], messageId: this.genId() },
       options
     );
     return this.asTask(result);
@@ -103,13 +103,13 @@ export class TaskManager {
   private extractText(task: A2ATask): string {
     if (task.artifacts && task.artifacts.length > 0) {
       return task.artifacts[0].parts
-        .filter((p) => p.kind === "text" && p.text)
+        .filter((p) => "kind" in p && p.kind === "text" && "text" in p && p.text)
         .map((p) => (p as any).text)
         .join("\n");
     }
     if (task.status?.message?.parts) {
       return task.status.message.parts
-        .filter((p) => p.kind === "text" && p.text)
+        .filter((p) => "kind" in p && p.kind === "text" && "text" in p && p.text)
         .map((p) => (p as any).text)
         .join("\n");
     }

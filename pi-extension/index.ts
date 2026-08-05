@@ -46,7 +46,8 @@ interface ConversationEntry {
   pendingAsyncTasks: string[];
 }
 
-const STORAGE_DIR = path.join(process.env.HOME || "", ".pi", "agent", "a2a");
+const STORAGE_DIR = process.env.PI_A2A_CONFIG_DIR
+  || path.join(process.env.HOME || os.homedir(), ".pi", "agent", "a2a");
 const CONFIG_FILE = `${STORAGE_DIR}/config.json`;
 const AGENTS_FILE = `${STORAGE_DIR}/agents.json`;
 const GATEWAYS_FILE = `${STORAGE_DIR}/gateways.json`;
@@ -54,6 +55,7 @@ const CONVERSATIONS_FILE = `${STORAGE_DIR}/conversations.json`;
 const IDLE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 let conversations: Record<string, ConversationEntry> = {};
@@ -1340,7 +1342,7 @@ Examples:
         const result = await taskManager.sendTask(agent, params.message as string, {
           contextId,
           timeout: (params.timeout as number) ?? 60000,
-          polling: { intervalMs: 2000, maxAttempts: 30, timeoutMs: 120000 },
+          polling: { intervalMs: 2000, maxAttempts: 180, timeoutMs: 600000 },
         });
         const text = extractTextFromResult(result);
         recordTask((result as any).id, agent, params.message as string);

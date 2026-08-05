@@ -21,16 +21,16 @@ import { A2AError } from "./errors.js";
 import { JSONRPCErrorCode } from "./types.js";
 
 const METHODS = {
-  SEND_MESSAGE: "message/send",
-  STREAM_MESSAGE: "message/stream",
-  GET_TASK: "tasks/get",
-  CANCEL_TASK: "tasks/cancel",
-  RESUBSCRIBE: "tasks/resubscribe",
-  LIST_TASKS: "tasks/list",
-  PUSH_SET: "tasks/pushNotification/set",
-  PUSH_GET: "tasks/pushNotification/get",
-  PUSH_LIST: "tasks/pushNotificationConfig/list",
-  PUSH_DELETE: "tasks/pushNotificationConfig/delete",
+  SEND_MESSAGE: "SendMessage",
+  STREAM_MESSAGE: "SendStreamingMessage",
+  GET_TASK: "GetTask",
+  CANCEL_TASK: "CancelTask",
+  RESUBSCRIBE: "ResubscribeToTask",
+  LIST_TASKS: "ListTasks",
+  PUSH_SET: "SetPushNotification",
+  PUSH_GET: "GetPushNotification",
+  PUSH_LIST: "ListPushNotificationConfigs",
+  PUSH_DELETE: "DeletePushNotificationConfig",
 } as const;
 
 const ENDPOINTS = {
@@ -69,8 +69,13 @@ export class A2AClient {
     // Try standard A2A path first
     const cardUrl = `${base}${ENDPOINTS.AGENT_CARD}`;
     try {
-      const card = (await this.httpGet(cardUrl, headers)) as AgentCard;
-      return { ...card, url: card.url || url, discoveredAt: Date.now() } as RemoteAgent;
+      const card = (await this.httpGet(cardUrl, headers)) as AgentCard & {
+        supportedInterfaces?: Array<{ url?: string }>;
+      };
+      // A2A 1.0 publishes the transport in supportedInterfaces; older cards
+      // used a top-level url. Prefer the explicit transport when available.
+      const transportUrl = card.url || card.supportedInterfaces?.[0]?.url || url;
+      return { ...card, url: transportUrl, discoveredAt: Date.now() } as RemoteAgent;
     } catch (err: any) {
       // 404 → try LiteLLM agent.json fallback
       if (err.message && err.message.includes("HTTP 404")) {
@@ -86,7 +91,6 @@ export class A2AClient {
 
   async sendMessage(agent: RemoteAgent, message: Message, options: TaskOptions = {}): Promise<A2ATask | Message> {
     if (!message.contextId) message.contextId = this.generateId();
-    message.kind = "message";
 
     const request = this.createRequest(METHODS.SEND_MESSAGE, {
       message,
@@ -141,7 +145,6 @@ export class A2AClient {
     options: TaskOptions = {}
   ): Promise<A2ATask> {
     if (!message.contextId) message.contextId = this.generateId();
-    message.kind = "message";
 
     const request = this.createRequest(METHODS.STREAM_MESSAGE, {
       message,
@@ -275,13 +278,41 @@ export class A2AClient {
    * fasta2a v0.6.1 uses `context_id` while the A2A client expects `contextId`.
    */
   private normalizeTask(raw: Record<string, unknown>): A2ATask {
-    // If already camelCase, return as-is
-    if ("contextId" in raw) return raw as unknown as A2ATask;
-    // Normalize snake_case → camelCase
+    // Normalize both snake_case v0.3 and camelCase/native v1 tasks. Native
+    // AVF tasks already have contextId, but still require state/part normalization.
     const out: Record<string, unknown> = { ...raw };
     if ("context_id" in out) {
       out.contextId = out.context_id as string;
       delete out.context_id;
+    }
+    if (out.status && typeof out.status === "object") {
+      const status = { ...(out.status as Record<string, unknown>) };
+      if (typeof status.state === "string") {
+        status.state = status.state.replace(/^TASK_STATE_/, "").toLowerCase();
+      }
+      if (status.message && typeof status.message === "object") {
+        const message = { ...(status.message as Record<string, unknown>) };
+        if (Array.isArray(message.parts)) {
+          message.parts = message.parts.map((part: any) =>
+            part && typeof part === "object" && part.kind === undefined && typeof part.text === "string"
+              ? { ...part, kind: "text" }
+              : part
+          );
+        }
+        status.message = message;
+      }
+      out.status = status;
+    }
+    if (Array.isArray(out.artifacts)) {
+      out.artifacts = (out.artifacts as unknown[]).map((artifact: any) =>
+        artifact && typeof artifact === "object" && Array.isArray(artifact.parts)
+          ? { ...artifact, parts: artifact.parts.map((part: any) =>
+              part && typeof part === "object" && part.kind === undefined && typeof part.text === "string"
+                ? { ...part, kind: "text" }
+                : part
+            ) }
+          : artifact
+      );
     }
     // Normalize history messages too
     if (Array.isArray(out.history)) {
@@ -355,9 +386,8 @@ export class A2AClient {
   private buildSendConfig(options: TaskOptions) {
     return {
       acceptedOutputModes: options.acceptedOutputModes ?? ["text/plain", "application/json"],
-      blocking: options.blocking !== undefined ? options.blocking : false,
       historyLength: options.historyLength,
-      pushNotificationConfig: options.pushNotificationConfig,
+      returnImmediately: options.blocking !== undefined ? !options.blocking : true,
     };
   }
 
@@ -383,13 +413,19 @@ export class A2AClient {
       const parsed = new URL(url);
       const req = this.httpMod(url).request({
         hostname: parsed.hostname, port: parsed.port, path: parsed.pathname, method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), ...this.buildAuthHeaders() },
+        headers: { "Content-Type": "application/json", "A2A-Version": "1.0", "Content-Length": Buffer.byteLength(body), ...this.buildAuthHeaders() },
         timeout,
         agent: false, // force new connection every time — avoids stale keep-alive sockets hanging on gateway
       }, (res: http.IncomingMessage) => {
         let data = "";
         res.on("data", (chunk: string) => (data += chunk));
-        res.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error(`Invalid JSON: ${data.slice(0, 200)}`)); } });
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
+            return;
+          }
+          try { resolve(JSON.parse(data)); } catch { reject(new Error(`Invalid JSON: ${data.slice(0, 200)}`)); }
+        });
       });
       req.on("error", reject);
       req.on("timeout", () => { req.destroy(); reject(new Error(`Request timed out after ${timeout}ms`)); });
@@ -423,7 +459,7 @@ export class A2AClient {
       const body = JSON.stringify(request);
       const req = this.httpMod(url).request({
         hostname: new URL(url).hostname, port: new URL(url).port, path: new URL(url).pathname, method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream", "Content-Length": Buffer.byteLength(body), ...this.buildAuthHeaders() },
+        headers: { "Content-Type": "application/json", "A2A-Version": "1.0", Accept: "text/event-stream", "Content-Length": Buffer.byteLength(body), ...this.buildAuthHeaders() },
         timeout: this.config.timeout,
         agent: false, // avoid stale keep-alive sockets
       }, (res: http.IncomingMessage) => {

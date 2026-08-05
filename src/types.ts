@@ -4,10 +4,15 @@
 
 // ─── Part (discriminated union with kind) ───
 
-export type Part = TextPart | FilePart | DataPart;
+export type Part = TextPart | NativeTextPart | FilePart | DataPart;
 
 export interface TextPart {
   kind: "text";
+  text: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface NativeTextPart {
   text: string;
   metadata?: Record<string, unknown>;
 }
@@ -37,7 +42,7 @@ export interface DataPart {
 // ─── Message ───
 
 export interface Message {
-  role: "user" | "agent";
+  role: "user" | "agent" | "ROLE_USER" | "ROLE_AGENT";
   parts: Part[];
   kind?: "message";
   metadata?: Record<string, unknown>;
@@ -326,7 +331,6 @@ export interface TaskOptions {
   acceptedOutputModes?: string[];
   pushNotificationConfig?: PushNotificationConfig;
   polling?: PollingOptions;
-  contextId?: string | null; // Reuse existing conversation context
   metadata?: Record<string, unknown>;
 }
 
