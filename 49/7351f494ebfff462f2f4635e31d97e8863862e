@@ -1,0 +1,25 @@
+pi-extension/index.ts
+  s_e47e01bc7b5b62::t_856814f8623b54 49-50,58,1345
+src/client.ts
+  s_e47e01bc7b5b62::t_4ba0d37c83d5cd 24-33,72-78,281-282,288-316,390,416,422-428,462
+src/task-manager.ts
+  s_e47e01bc7b5b62::t_649bb9031ba644 20,27,106,112
+src/types.ts
+  s_e47e01bc7b5b62::t_06f8abbb9e6e0b 7,15-19,45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "497351f494ebfff462f2f4635e31d97e8863862e",
+  "prompts": {},
+  "sessions": {
+    "s_e47e01bc7b5b62": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fcec1-0a43-78c7-8126-60a7de59f216",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Derek Santos <dersanto@cisco.com>"
+    }
+  }
+}
