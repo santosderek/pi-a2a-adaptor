@@ -1416,6 +1416,143 @@ Examples:
 
 
   /**
+   * a2a_send_async tool — non-blocking submit; result is delivered back into the
+   * session as a follow-up message that triggers a turn when the task finishes.
+   * Unlike /a2a-send-async it does NOT block other calls to the same agent.
+   */
+  const ASYNC_TERMINAL = ["completed", "failed", "canceled", "rejected"];
+  const ASYNC_MAX_MS = 60 * 60 * 1000;
+  pi.registerTool({
+    name: "a2a_send_async",
+    label: "A2A Async Send",
+    description:
+      "Submit a task to a remote A2A agent WITHOUT waiting. Returns a task id immediately; when the agent finishes, the result is delivered back into this session automatically (a follow-up turn). Use a2a_task_status to check on it. Prefer this over a2a_call for anything that may take more than ~30s.",
+    parameters: {
+      type: "object",
+      properties: {
+        agent_url: { type: "string", description: "URL or name of the A2A agent" },
+        message: { type: "string", description: "Task message to send" },
+        new_conversation: { type: "boolean", description: "Ignore existing context and start a fresh conversation", default: false },
+      },
+      required: ["agent_url", "message"],
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (!taskManager || !a2aClient) {
+        return { content: [{ type: "text" as const, text: "A2A not initialized" }], isError: true };
+      }
+      try {
+        const agent = resolveAgent(params.agent_url as string);
+        const message = params.message as string;
+        const fresh = params.new_conversation === true;
+        const contextId = fresh ? null : resolveConversationContext(agent.url);
+
+        const result = await taskManager.sendTask(agent, message, {
+          contextId,
+          timeout: config!.taskDefaults.sendAsyncTimeout,
+          blocking: false,
+          polling: { intervalMs: 2000, maxAttempts: 0, timeoutMs: 0 },
+        });
+
+        const taskId = (result as any)?.id as string | undefined;
+        const state = (result as any)?.status?.state as string | undefined;
+
+        const bookkeep = () => {
+          if (contextId) touchConversation(agent.url);
+          else createConversationEntry(agent.url, (result as any).contextId, message);
+        };
+
+        // Direct reply or already-terminal task: nothing to poll.
+        if (!taskId || (state && ASYNC_TERMINAL.includes(state))) {
+          if (taskId) recordTask(taskId, agent, message, null);
+          bookkeep();
+          return { content: [{ type: "text" as const, text: `Finished immediately:\n${extractTextFromResult(result as any)}` }] };
+        }
+
+        const startedAt = Date.now();
+        const pollInterval = setInterval(async () => {
+          try {
+            if (Date.now() - startedAt > ASYNC_MAX_MS) {
+              clearInterval(pollInterval);
+              const r = taskMap.get(taskId);
+              if (r) r.pollingInterval = null;
+              (pi as any).sendMessage(
+                { customType: "a2a-result", display: true, content: `[A2A ${agent.name}] Task ${taskId.slice(0, 8)} still not finished after 60 min; stopped polling. Use a2a_task_status ${taskId}.` },
+                { triggerTurn: true, deliverAs: "followUp" },
+              );
+              return;
+            }
+            const task = await a2aClient!.getTask(agent, taskId);
+            if (!ASYNC_TERMINAL.includes(task.status.state)) return;
+            clearInterval(pollInterval);
+            const r = taskMap.get(taskId);
+            if (r) r.pollingInterval = null;
+            const text = extractTextFromResult(task);
+            (pi as any).sendMessage(
+              {
+                customType: "a2a-result",
+                display: true,
+                content: `[A2A ${agent.name}] Task ${taskId.slice(0, 8)} ${task.status.state}:\n${text}`,
+                details: { taskId, agentUrl: agent.url, state: task.status.state },
+              },
+              { triggerTurn: true, deliverAs: "followUp" },
+            );
+          } catch {
+            /* transient poll error: retry on next tick */
+          }
+        }, 5000);
+
+        recordTask(taskId, agent, message, pollInterval);
+        bookkeep();
+        return {
+          content: [{ type: "text" as const, text: `Submitted task ${taskId} to ${agent.name} (state: ${state ?? "submitted"}). Not waiting: the result will arrive in this session automatically. Use a2a_task_status to check.` }],
+          details: { taskId, agentUrl: agent.url },
+        };
+      } catch (err: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+      }
+    },
+  });
+
+  /**
+   * a2a_task_status tool
+   */
+  pi.registerTool({
+    name: "a2a_task_status",
+    label: "A2A Task Status",
+    description:
+      "Check A2A tasks submitted with a2a_send_async. With task_id (full or prefix): fetch its current state and, if finished, its result. Without: list tasks currently being polled.",
+    parameters: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task id or prefix (optional)" },
+      },
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (!a2aClient) {
+        return { content: [{ type: "text" as const, text: "A2A not initialized" }], isError: true };
+      }
+      try {
+        const id = (params.task_id as string | undefined)?.trim();
+        if (!id) {
+          const pending = [...taskMap.values()].filter((r) => r.pollingInterval !== null);
+          if (pending.length === 0) return { content: [{ type: "text" as const, text: "No pending async tasks" }] };
+          const lines = pending.map((r) => `${r.taskId} → ${r.agentName} (${Math.round((Date.now() - r.submittedAt) / 1000)}s): ${r.message.slice(0, 80)}`);
+          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        }
+        const rec = findTaskRecord(id);
+        if (!rec) return { content: [{ type: "text" as const, text: `Unknown task ${id} (only tasks from this session are tracked)` }], isError: true };
+        const agent = resolveAgent(rec.agentUrl);
+        const task = await a2aClient.getTask(agent, rec.taskId);
+        const done = ASYNC_TERMINAL.includes(task.status.state);
+        const text = done ? `\n${extractTextFromResult(task)}` : "";
+        return { content: [{ type: "text" as const, text: `Task ${rec.taskId} (${rec.agentName}): ${task.status.state}${text}` }] };
+      } catch (err: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+      }
+    },
+  });
+
+  /**
    * a2a_parallel tool
    */
   pi.registerTool({
