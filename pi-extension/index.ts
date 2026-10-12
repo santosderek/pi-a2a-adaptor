@@ -335,6 +335,25 @@ function recordTask(taskId: string, agent: RemoteAgent, message: string, polling
   });
 }
 
+/** UI context used to keep a footer status for in-flight async A2A tasks. */
+let statusCtx: any = null;
+
+function refreshA2AStatus(): void {
+  const ui = statusCtx?.ui;
+  if (!ui?.setStatus) return;
+  const pending = [...taskMap.values()].filter((r) => r.pollingInterval !== null);
+  if (pending.length === 0) { ui.setStatus("a2a", undefined); return; }
+  const oldest = pending.reduce((a, b) => (a.submittedAt <= b.submittedAt ? a : b));
+  const secs = Math.round((Date.now() - oldest.submittedAt) / 1000);
+  const elapsed = secs >= 60 ? `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s` : `${secs}s`;
+  let who = oldest.agentName;
+  try { who = new URL(oldest.agentUrl).hostname.split(".")[0]; } catch { /* keep agentName */ }
+  const label = pending.length === 1
+    ? `${who} ${oldest.taskId.slice(0, 8)}`
+    : `${pending.length} tasks`;
+  ui.setStatus("a2a", `\u23f3 A2A \u00b7 ${label} \u00b7 ${elapsed}`);
+}
+
 function findTaskRecord(taskId: string): TaskRecord | null {
   // Exact match
   if (taskMap.has(taskId)) return taskMap.get(taskId)!;
@@ -352,6 +371,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     config = DEFAULT_CONFIG;
+    statusCtx = ctx;
     // Load persisted config overrides
     const saved = loadConfig();
     if (saved.client?.timeout !== undefined) config.client.timeout = saved.client!.timeout;
@@ -1441,6 +1461,7 @@ Examples:
         return { content: [{ type: "text" as const, text: "A2A not initialized" }], isError: true };
       }
       try {
+        statusCtx = _ctx ?? statusCtx;
         const agent = resolveAgent(params.agent_url as string);
         const message = params.message as string;
         const fresh = params.new_conversation === true;
@@ -1470,11 +1491,13 @@ Examples:
 
         const startedAt = Date.now();
         const pollInterval = setInterval(async () => {
+          refreshA2AStatus();
           try {
             if (Date.now() - startedAt > ASYNC_MAX_MS) {
               clearInterval(pollInterval);
               const r = taskMap.get(taskId);
               if (r) r.pollingInterval = null;
+              refreshA2AStatus();
               (pi as any).sendMessage(
                 { customType: "a2a-result", display: true, content: `[A2A ${agent.name}] Task ${taskId.slice(0, 8)} still not finished after 60 min; stopped polling. Use a2a_task_status ${taskId}.` },
                 { triggerTurn: true, deliverAs: "followUp" },
@@ -1486,6 +1509,7 @@ Examples:
             clearInterval(pollInterval);
             const r = taskMap.get(taskId);
             if (r) r.pollingInterval = null;
+            refreshA2AStatus();
             const text = extractTextFromResult(task);
             (pi as any).sendMessage(
               {
@@ -1502,6 +1526,7 @@ Examples:
         }, 5000);
 
         recordTask(taskId, agent, message, pollInterval);
+        refreshA2AStatus();
         bookkeep();
         return {
           content: [{ type: "text" as const, text: `Submitted task ${taskId} to ${agent.name} (state: ${state ?? "submitted"}). Not waiting: the result will arrive in this session automatically. Use a2a_task_status to check.` }],
