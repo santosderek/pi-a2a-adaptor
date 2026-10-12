@@ -1,0 +1,19 @@
+pi-extension/index.ts
+  s_b96e35cdf88c04::t_5ebd07568475c7 1418-1554
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "351dec6d2bc76a5b788cb1ace5bcc0bc2cf3ec0a",
+  "prompts": {},
+  "sessions": {
+    "s_b96e35cdf88c04": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a1309a-b2a1-76b0-abcf-d9089a956c8f",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Derek Santos <dersanto@cisco.com>"
+    }
+  }
+}
