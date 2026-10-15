@@ -1,0 +1,29 @@
+src/conversations.ts
+  s_3c0b761af68b9f::t_a01043ff03eff5 1-148
+README.md
+  s_3c0b761af68b9f::t_88cc56a127e8e9 228-235
+pi-extension/index.ts
+  s_3c0b761af68b9f::t_8c0a0c254054ea 14,61-64,67,70-71,75-77,79-81,84-85,88-91,94-95,98-101,105-106,108-109,112-113,116-117,341,688,786,881,887-889,896,898,1284-1285,1302-1304,1316,1318,1341-1342,1359-1361,1373,1375,1404,1417-1419,1432-1433
+src/task-manager.ts
+  s_3c0b761af68b9f::t_c337306b357c62 20,27,33-42
+src/types.ts
+  s_3c0b761af68b9f::t_003dd227881424 326-327
+tests/conversations.test.ts
+  s_3c0b761af68b9f::t_7ae9b4fa5e66cd 1-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4d7adbce67537ab8740c444d29e7aa4820ebdc62",
+  "prompts": {},
+  "sessions": {
+    "s_3c0b761af68b9f": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a131cd-8935-708e-bb76-2c76bc429616",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Derek Santos <dersanto@cisco.com>"
+    }
+  }
+}
