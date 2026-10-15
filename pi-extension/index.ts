@@ -11,6 +11,7 @@ import { AgentRegistry } from "../src/registry.js";
 import { TaskManager } from "../src/task-manager.js";
 import type { A2AConfig, NacosConfig, RemoteAgent, TaskOptions } from "../src/types.js";
 import { NacosRegistryClient } from "../src/nacos-registry.js";
+import { ConversationStore, DEFAULT_IDLE_TTL_MS, conversationKey, namedScope } from "../src/conversations.js";
 
 // ─── Global State ───
 
@@ -52,132 +53,68 @@ const CONFIG_FILE = `${STORAGE_DIR}/config.json`;
 const AGENTS_FILE = `${STORAGE_DIR}/agents.json`;
 const GATEWAYS_FILE = `${STORAGE_DIR}/gateways.json`;
 const CONVERSATIONS_FILE = `${STORAGE_DIR}/conversations.json`;
-const IDLE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-let conversations: Record<string, ConversationEntry> = {};
-let conversationSeq = 0; // monotonically increasing counter for display numbering
+const IDLE_TTL = Number(process.env.PI_A2A_IDLE_TTL_MS) || DEFAULT_IDLE_TTL_MS;
+const store = new ConversationStore(CONVERSATIONS_FILE, IDLE_TTL);
+// Scope = id of this pi session, so each pi session gets its own remote context per agent.
+let currentScope = `proc-${process.pid}-${Date.now().toString(36)}`;
 
 function loadConversations(): void {
-  try {
-    if (fs.existsSync(CONVERSATIONS_FILE)) {
-      conversations = JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, "utf-8"));
-    }
-  } catch { /* ignore */ }
-  conversations = conversations || {};
-  // Find max sequence number from existing entries for display
-  for (const entry of Object.values(conversations)) {
-    if (entry.topic) {
-      const m = entry.topic.match(/#(\d+)/);
-      if (m) conversationSeq = Math.max(conversationSeq, parseInt(m[1], 10));
-    }
-  }
+  store.load();
 }
 
-function saveConversations(): void {
-  try {
-    ensureStorageDir();
-    const tmp = CONVERSATIONS_FILE + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(conversations, null, 2));
-    fs.renameSync(tmp, CONVERSATIONS_FILE);
-  } catch { /* ignore */ }
-}
-
-/**
- * Check if agent has pending async tasks.
- * Returns the taskId string if pending, null otherwise.
- */
-function getPendingAsync(agentUrl: string): string | null {
-  const entry = conversations[agentUrl];
-  if (!entry || entry.pendingAsyncTasks.length === 0) return null;
-  // Clean up any stale entries
-  entry.pendingAsyncTasks = entry.pendingAsyncTasks.filter(id => taskMap.has(id));
-  if (entry.pendingAsyncTasks.length === 0) {
-    saveConversations();
-    return null;
-  }
-  return entry.pendingAsyncTasks[0];
+function keyFor(agentUrl: string, explicit: string | null = null): string {
+  return conversationKey(agentUrl, explicit ? namedScope(explicit) : currentScope);
 }
 
 /**
  * Resolve the contextId for a new message to an agent.
- * Returns null if no context should be reused (no record, 24h idle, or pending async).
+ * An explicit context_id wins and is used as-is (it may be shared between pi sessions);
+ * otherwise this pi session's stored context (null => start a new one, server mints the id).
  */
-function resolveConversationContext(agentUrl: string): string | null {
-  const entry = conversations[agentUrl];
-  if (!entry) return null;
-  // Pending async blocks all submissions
-  if (entry.pendingAsyncTasks.length > 0) return null;
-  // 24h idle → expired
-  if (Date.now() - entry.lastMessageAt > IDLE_TTL_MS) return null;
-  return entry.contextId;
+function resolveConversationContext(agentUrl: string, explicit: string | null = null): string | null {
+  if (explicit) return explicit;
+  return store.resolve(keyFor(agentUrl));
 }
 
-function nextConversationNumber(): number {
-  conversationSeq++;
-  return conversationSeq;
+function createConversationEntry(agentUrl: string, contextId: string, message: string, explicit: string | null = null): string {
+  return store.create(keyFor(agentUrl, explicit), contextId, message);
 }
 
-/**
- * Create a new conversation entry for an agent.
- */
-function createConversationEntry(agentUrl: string, contextId: string, message: string): string {
-  const num = nextConversationNumber();
-  conversations[agentUrl] = {
-    contextId,
-    topic: `#${num} ${message.slice(0, 50)}`,
-    lastMessageAt: Date.now(),
-    pendingAsyncTasks: [],
-  };
-  saveConversations();
-  return `#${num}`;
+function touchConversation(agentUrl: string, explicit: string | null = null): void {
+  const k = keyFor(agentUrl, explicit);
+  if (explicit && !store.get(k)) store.create(k, explicit, "(named context)");
+  else store.touch(k);
 }
 
-/**
- * Update conversation activity after a message is sent.
- */
-function touchConversation(agentUrl: string): void {
-  const entry = conversations[agentUrl];
-  if (entry) {
-    entry.lastMessageAt = Date.now();
-    saveConversations();
-  }
-}
-
-/**
- * Remove conversation entry for an agent.
- */
 function removeConversationEntry(agentUrl: string): void {
-  delete conversations[agentUrl];
-  saveConversations();
+  store.remove(keyFor(agentUrl));
+}
+
+/** Context id param helper for tools: explicit named context or null. */
+function explicitCtx(params: any): string | null {
+  const v = typeof params?.context_id === "string" ? params.context_id.trim() : "";
+  return v || null;
 }
 
 /**
- * Register an async task in the conversation entry.
+ * Pending async tasks no longer block anything: the server serializes tasks of one
+ * contextId and runs different contexts in parallel.
  */
-function registerAsyncTask(agentUrl: string, taskId: string): void {
-  const entry = conversations[agentUrl];
-  if (entry) {
-    if (!entry.pendingAsyncTasks.includes(taskId)) {
-      entry.pendingAsyncTasks.push(taskId);
-    }
-    entry.lastMessageAt = Date.now();
-    saveConversations();
-  }
+function getPendingAsync(_agentUrl: string): string | null {
+  return null;
 }
 
-/**
- * Remove a completed async task from the conversation entry.
- */
-function completeAsyncTask(agentUrl: string, taskId: string): void {
-  const entry = conversations[agentUrl];
-  if (entry) {
-    entry.pendingAsyncTasks = entry.pendingAsyncTasks.filter(id => id !== taskId);
-    saveConversations();
-  }
+function registerAsyncTask(agentUrl: string, taskId: string, explicit: string | null = null): void {
+  store.addPending(keyFor(agentUrl, explicit), taskId);
+}
+
+function completeAsyncTask(agentUrl: string, taskId: string, explicit: string | null = null): void {
+  store.completePending(keyFor(agentUrl, explicit), taskId);
 }
 
 // ─── Persistence ───
@@ -401,6 +338,7 @@ export default function (pi: ExtensionAPI) {
     for (const sa of savedAgents) registry.add(sa.agent);
 
     taskManager = new TaskManager(a2aClient, registry);
+    try { const sid = ctx?.sessionManager?.getSessionId?.(); if (sid) currentScope = `pi-${sid}`; } catch { /* keep process scope */ }
     loadConversations();
     if (savedAgents.length > 0) {
       ctx.ui?.notify?.(`A2A adaptor initialized. ${savedAgents.length} agents restored from last session.`, "info");
@@ -747,7 +685,7 @@ export default function (pi: ExtensionAPI) {
           createConversationEntry(agent.url, result.contextId, message);
         }
 
-        const convLabel = conversations[agent.url]?.topic?.split(" ")[0] || "";
+        const convLabel = store.get(keyFor(agent.url))?.topic?.split(" ")[0] || "";
         ctx.ui?.notify?.(`Result${convLabel}:\n${text}`, "success");
       } catch (err: any) {
         ctx.ui?.notify?.(`Task failed: ${err.message}`, "error");
@@ -845,7 +783,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui?.notify?.(`Task submitted: ${taskId.slice(0, 8)} → ${agent.name} ${convLabel}. Use /a2a-pending to track.`, "info");
         } else {
           touchConversation(agent.url);
-          const convLabel = conversations[agent.url]?.topic?.split(" ")[0] || "";
+          const convLabel = store.get(keyFor(agent.url))?.topic?.split(" ")[0] || "";
           ctx.ui?.notify?.(`Task submitted: ${taskId.slice(0, 8)} → ${agent.name} ${convLabel}. Use /a2a-pending to track.`, "info");
         }
       } catch (err: any) {
@@ -940,22 +878,24 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("a2a-conversations", {
     description: "List conversation contexts for all agents",
     handler: async (_args, ctx) => {
-      const entries = Object.entries(conversations);
+      const entries = Object.entries(store.all());
       if (entries.length === 0) {
         ctx.ui?.notify?.("No active conversations", "info");
         return;
       }
       const lines: string[] = [];
-      for (const [url, entry] of entries) {
+      for (const [key, entry] of entries) {
+        const [url, scope] = [key.split("|")[0], key.split("|").slice(1).join("|")];
+        const mine = scope === currentScope ? " (this session)" : scope.startsWith("named:") ? ` (${scope})` : scope ? " (other session)" : "";
         const name = registry?.list().find(a => a.url === url)?.name || url;
         const hasPending = entry.pendingAsyncTasks.length > 0;
         const idleMs = Date.now() - entry.lastMessageAt;
         const idleStr = idleMs > 60 * 60 * 1000
           ? `${Math.floor(idleMs / (60 * 60 * 1000))}h ago`
           : `${Math.floor(idleMs / 60000)}m ago`;
-        const expired = idleMs > IDLE_TTL_MS ? " (expired)" : "";
+        const expired = idleMs > IDLE_TTL ? " (expired)" : "";
         const status = hasPending ? `⏳ ${entry.pendingAsyncTasks[0].slice(0, 8)}` : `✓ active${expired}`;
-        lines.push(`${name}:\n  ${entry.topic} — ${status} — ${idleStr}`);
+        lines.push(`${name}${mine}:\n  ${entry.topic} — ${status} — ${idleStr} — ${entry.contextId}`);
       }
       ctx.ui?.notify?.(`Conversations:\n${lines.join("\n\n")}`, "info");
     },
@@ -1341,6 +1281,8 @@ Examples:
         agent_url: { type: "string", description: "URL or name of the A2A agent" },
         message: { type: "string", description: "Task message to send" },
         timeout: { type: "number", description: "Timeout in milliseconds", default: 60000 },
+        context_id: { type: "string", description: "Optional explicit contextId. Each distinct contextId is its own persistent remote session; different ids run in parallel, the same id is serialized. Default: this pi session's own context (separate from other pi sessions)." },
+        new_conversation: { type: "boolean", description: "Start a fresh context for this pi session (ignored if context_id is set)", default: false },
       },
       required: ["agent_url", "message"],
     },
@@ -1357,7 +1299,9 @@ Examples:
           return { content: [{ type: "text" as const, text: `Agent 正在执行异步任务 (${pending.slice(0, 8)})，请稍后重试` }], isError: true };
         }
 
-        const contextId = resolveConversationContext(agent.url);
+        const ec = explicitCtx(params);
+        if (params.new_conversation === true && !ec) removeConversationEntry(agent.url);
+        const contextId = resolveConversationContext(agent.url, ec);
 
         const result = await taskManager.sendTask(agent, params.message as string, {
           contextId,
@@ -1369,9 +1313,9 @@ Examples:
 
         // Update conversation entry
         if (contextId) {
-          touchConversation(agent.url);
+          touchConversation(agent.url, ec);
         } else {
-          createConversationEntry(agent.url, result.contextId, params.message as string);
+          createConversationEntry(agent.url, result.contextId, params.message as string, ec);
         }
 
         return { content: [{ type: "text" as const, text }] };
@@ -1394,6 +1338,8 @@ Examples:
         agent_url: { type: "string", description: "URL or name of the A2A agent" },
         message: { type: "string", description: "Task message to send" },
         timeout: { type: "number", description: "Timeout in milliseconds", default: 60000 },
+        context_id: { type: "string", description: "Optional explicit contextId. Each distinct contextId is its own persistent remote session; different ids run in parallel, the same id is serialized. Default: this pi session's own context (separate from other pi sessions)." },
+        new_conversation: { type: "boolean", description: "Start a fresh context for this pi session (ignored if context_id is set)", default: false },
       },
       required: ["agent_url", "message"],
     },
@@ -1410,7 +1356,9 @@ Examples:
           return { content: [{ type: "text" as const, text: `Agent 正在执行异步任务 (${pending.slice(0, 8)})，请稍后重试` }], isError: true };
         }
 
-        const contextId = resolveConversationContext(agent.url);
+        const ec = explicitCtx(params);
+        if (params.new_conversation === true && !ec) removeConversationEntry(agent.url);
+        const contextId = resolveConversationContext(agent.url, ec);
 
         const result = await taskManager.sendTask(agent, params.message as string, {
           contextId,
@@ -1422,9 +1370,9 @@ Examples:
 
         // Update conversation entry
         if (contextId) {
-          touchConversation(agent.url);
+          touchConversation(agent.url, ec);
         } else {
-          createConversationEntry(agent.url, result.contextId, params.message as string);
+          createConversationEntry(agent.url, result.contextId, params.message as string, ec);
         }
 
         return { content: [{ type: "text" as const, text }] };
@@ -1453,6 +1401,7 @@ Examples:
         agent_url: { type: "string", description: "URL or name of the A2A agent" },
         message: { type: "string", description: "Task message to send" },
         new_conversation: { type: "boolean", description: "Ignore existing context and start a fresh conversation", default: false },
+        context_id: { type: "string", description: "Optional explicit contextId (own persistent remote session; different ids run in parallel, same id serialized)" },
       },
       required: ["agent_url", "message"],
     },
@@ -1465,7 +1414,9 @@ Examples:
         const agent = resolveAgent(params.agent_url as string);
         const message = params.message as string;
         const fresh = params.new_conversation === true;
-        const contextId = fresh ? null : resolveConversationContext(agent.url);
+        const ec = explicitCtx(params);
+        if (fresh && !ec) removeConversationEntry(agent.url);
+        const contextId = fresh && !ec ? null : resolveConversationContext(agent.url, ec);
 
         const result = await taskManager.sendTask(agent, message, {
           contextId,
@@ -1478,8 +1429,8 @@ Examples:
         const state = (result as any)?.status?.state as string | undefined;
 
         const bookkeep = () => {
-          if (contextId) touchConversation(agent.url);
-          else createConversationEntry(agent.url, (result as any).contextId, message);
+          if (contextId) touchConversation(agent.url, ec);
+          else createConversationEntry(agent.url, (result as any).contextId, message, ec);
         };
 
         // Direct reply or already-terminal task: nothing to poll.

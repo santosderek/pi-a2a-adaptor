@@ -17,17 +17,27 @@ export class TaskManager {
     if (onUpdate) {
       return this.client.sendStreamingMessage(
         agent,
-        { role: "ROLE_USER", parts: [{ text: message }], messageId: this.genId() },
+        this.buildMessage(message, options),
         onUpdate,
         options
       );
     }
     const result = await this.client.sendMessage(
       agent,
-      { role: "ROLE_USER", parts: [{ text: message }], messageId: this.genId() },
+      this.buildMessage(message, options),
       options
     );
     return this.asTask(result);
+  }
+
+  /** Build the user message, carrying the caller's contextId so the remote session is reused. */
+  private buildMessage(message: string, options?: TaskOptions) {
+    return {
+      role: "ROLE_USER" as const,
+      parts: [{ text: message }],
+      messageId: this.genId(),
+      ...(options?.contextId ? { contextId: options.contextId } : {}),
+    };
   }
 
   async sendParallelTasks(

@@ -225,3 +225,11 @@ When using `/a2a-discover-all` with a LiteLLM Agent Gateway, `message/send` trig
 **Workarounds:**
 - Use `/a2a-send` or `/a2a-send-async` with the **direct agent URL** (bypassing LiteLLM) for long-running tasks.
 - Keep LiteLLM for agent discovery (`/a2a-discover-all`), then switch to direct URLs for task execution.
+
+## Conversation / context model
+
+- A conversation is identified by `(agent URL, calling pi session id)`. Two pi sessions talking to the same agent get independent `contextId`s, so they get independent remote sessions that run in parallel. A pi session keeps its own context across restarts (state in `~/.pi/agent/a2a/conversations.json`, merged per key so concurrent pi processes never overwrite each other; idle entries expire after 7 days, override with `PI_A2A_IDLE_TTL_MS`).
+- `context_id` on `a2a_call` / `managed_agents_a2a` / `a2a_send_async` addresses an explicit, shareable context. The same id is serialized by the server; different ids run in parallel.
+- `new_conversation: true` starts a fresh context for the calling session.
+- The `contextId` is now actually sent with every message (previously it was dropped, so every call started a new remote session).
+- Pending async tasks no longer block further calls to the agent.

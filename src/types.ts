@@ -323,6 +323,8 @@ export interface PollingOptions {
 }
 
 export interface TaskOptions {
+  /** Existing remote contextId to continue; null/undefined starts a new context. */
+  contextId?: string | null;
   streaming?: boolean;
   timeout?: number;
   signal?: AbortSignal;
